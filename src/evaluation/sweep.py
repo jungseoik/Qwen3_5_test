@@ -194,13 +194,13 @@ def write_summary_fp(sweep_dir: Path, ordered_models: list, results: dict, categ
 
 
 def write_summary_labeled(sweep_dir: Path, ordered_models: list, results: dict, categories: list):
-    """라벨 모드: 오탐감소율 + 정탐률 두 표 + 카운트."""
+    """라벨 모드: 오탐감소율 + 정탐유지율 두 표 + 카운트."""
     md_path = sweep_dir / "summary.md"
     csv_path = sweep_dir / "summary.csv"
 
     csv_cols = ["model", "category", "total", "positives", "negatives",
                 "tp", "fn", "tn", "fp", "unparsed", "error",
-                "fp_reduction_pct", "recall_pct"]
+                "fp_reduction_pct", "retention_pct", "loss_pct"]
     with csv_path.open("w", newline="") as f:
         w = csv.writer(f)
         w.writerow(csv_cols)
@@ -213,7 +213,7 @@ def write_summary_labeled(sweep_dir: Path, ordered_models: list, results: dict, 
                             row["positives"], row["negatives"],
                             row["tp"], row["fn"], row["tn"], row["fp"],
                             row["unparsed"], row["error"],
-                            row["fp_reduction_pct"], row["recall_pct"]])
+                            row["fp_reduction_pct"], row["retention_pct"], row["loss_pct"]])
 
     def write_table(f, title: str, col: str):
         f.write(f"## {title}\n\n")
@@ -228,15 +228,17 @@ def write_summary_labeled(sweep_dir: Path, ordered_models: list, results: dict, 
         f.write("\n")
 
     with md_path.open("w") as f:
-        f.write("# 모델 sweep 평가 요약 (라벨 모드)\n\n")
+        f.write("# 모델 sweep 평가 요약 (라벨 모드 — 오탐감소율 + 정탐유지율)\n\n")
         f.write(f"- 일시: {datetime.now():%Y-%m-%d %H:%M:%S}\n")
         f.write(f"- sweep 폴더: `{sweep_dir.name}`\n")
         ok = [m for m in ordered_models if results.get(m, {}).get("status") == "ok"]
         f.write(f"- 모델: 평가 {len(ok)}개 / 전체 {len(ordered_models)}개\n")
         f.write("- **오탐감소율** = `TN/(TN+FP)` (false 라벨 중 모델이 no 라 거른 비율)\n")
-        f.write("- **정탐률**     = `TP/(TP+FN)` (true  라벨 중 모델이 yes 라 유지한 비율)\n\n")
+        f.write("- **정탐유지율** = `TP/positives` (1차 양성 중 2차 VLM 이 유지한 비율)\n")
+        f.write("- **손실률**     = `FN/positives` (= 100 − 정탐유지율)\n\n")
         write_table(f, "오탐감소율 (%) — 모델이 오탐을 얼마나 잘 거르는가", "fp_reduction_pct")
-        write_table(f, "정탐률 (%) — 모델이 진짜 사건을 얼마나 잘 유지하는가", "recall_pct")
+        write_table(f, "정탐유지율 (%) — 1차 양성 중 2차 VLM 이 유지한 비율 (100% = 손실 없음)", "retention_pct")
+        write_table(f, "손실률 (%) — 정탐 놓친 비율 (낮을수록 좋음)", "loss_pct")
         f.write("각 모델 상세는 같은 폴더의 `{모델명}/eval.md` / `manifest.csv`, "
                 "그리고 오분류 썸네일 `{모델명}/fp/{카테고리}/` (놓친 오탐), "
                 "`{모델명}/fn/{카테고리}/` (놓친 정탐) 을 참고하세요.\n")
@@ -262,7 +264,7 @@ def main():
     ap.add_argument("--no-require-cached", dest="require_cached", action="store_false",
                     help="HF 캐시에 weight 없어도 시도 (기본은 자동 스킵)")
     ap.add_argument("--eval", choices=["fp", "labeled"], default="fp",
-                    help="평가 종류. fp=기존 오탐감소율 (기본), labeled=라벨 기반 오탐감소율+정탐률")
+                    help="평가 종류. fp=기존 오탐감소율 (기본), labeled=라벨 기반 오탐감소율+정탐유지율")
     ap.add_argument("--path", default=None,
                     help="라벨 모드 전용. labeled_eval 의 --path 로 전달 "
                          "(생략 시 최신 results/labeling/export/export_* 자동)")

@@ -123,13 +123,13 @@ results/
 | 값 | 호출 모듈 | 결과 폴더 prefix | summary 표 |
 |---|---|---|---|
 | `fp` (기본) | `fp_reduction.py` | `sweep_<TS>/` | 오탐감소율 1개 |
-| `labeled` | `labeled_eval.py` | `sweep_labeled_<TS>/` | 오탐감소율 + 정탐률 2개 (양면 비교) |
+| `labeled` | `labeled_eval.py` | `sweep_labeled_<TS>/` | 오탐감소율 + 정탐유지율 2개 (양면 비교) |
 
 ```bash
 # 기존 FP 가정 모드 (변화 없음)
 python src/evaluation/sweep.py
 
-# 라벨 기반 모드 (오탐감소율 + 정탐률 동시)
+# 라벨 기반 모드 (오탐감소율 + 정탐유지율 동시)
 python src/evaluation/sweep.py --eval labeled
 
 # 라벨 데이터 위치 직접 지정 (생략 시 최신 results/labeling/export/export_* 자동)

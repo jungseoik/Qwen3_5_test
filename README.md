@@ -20,7 +20,7 @@ Qwen3_5_test/
 │   │   ├── prompts.py         # 카테고리별 VQA 프롬프트 (편집 대상)
 │   │   ├── models.py          # sweep 평가 모델 리스트 (편집 대상)
 │   │   ├── fp_reduction.py    # 단일 모델 FP 평가 (전부 오탐 가정)
-│   │   ├── labeled_eval.py    # 단일 모델 라벨 평가 (오탐감소율 + 정탐률)
+│   │   ├── labeled_eval.py    # 단일 모델 라벨 평가 (오탐감소율 + 정탐유지율)
 │   │   └── sweep.py           # 다중 모델 sweep (--eval fp|labeled)
 │   └── labeling/             # 카테고리 True/False 라벨링 도구 (웹)
 │       ├── config.py         # 입력/출력 경로 설정 (편집 대상)
@@ -29,7 +29,7 @@ Qwen3_5_test/
 └── docs/                      # 각 도구 상세 문서
     ├── dataset_stats.md
     ├── eval_fp_reduction.md
-    ├── labeled_eval.md            # 라벨 기반 평가 (오탐감소율 + 정탐률)
+    ├── labeled_eval.md            # 라벨 기반 평가 (오탐감소율 + 정탐유지율)
     ├── sweep.md
     ├── labeling_tool.md           # 라벨링 도구 사용법
     └── labeling_tool_design.md    # 라벨링 도구 구현 설계(재현용)
@@ -298,13 +298,14 @@ python src/evaluation/fp_reduction.py --limit 50
 
 카테고리별 프롬프트는 `src/evaluation/prompts.py`에서 편집합니다. 자세한 개념, 옵션, 출력 항목, 실패 케이스 수집 동작은 [docs/eval_fp_reduction.md](docs/eval_fp_reduction.md)를 참고하십시오.
 
-## 라벨 기반 평가 (오탐감소율 + 정탐률)
+## 라벨 기반 평가 (오탐감소율 + 정탐유지율)
 
 사람이 검수한 라벨(`true`/`false`)이 붙은 이미지셋에 대해 **두 지표를 동시에** 측정합니다. 단순 FP 거름만이 아니라 "오탐을 줄이면서 정탐을 얼마나 유지하는가"를 양면으로 본다는 게 핵심입니다.
 
 ```
-오탐감소율 = TN / (TN + FP)     # false 라벨 중 모델이 no 라 거른 비율
-정탐률     = TP / (TP + FN)     # true  라벨 중 모델이 yes 라 유지한 비율
+오탐감소율 = TN / (TN + FP)        # false 라벨 중 모델이 no 라 거른 비율
+정탐유지율 = TP / positives        # 1차 양성 중 2차 VLM 이 유지한 비율
+손실률     = FN / positives        # = 100 − 정탐유지율
 ```
 
 입력은 라벨링 도구가 만든 export 폴더 (`results/labeling/export/export_<TS>/{cat}/{true,false}/*.jpg`)를 그대로 사용합니다. `--path` 생략 시 가장 최근 export 자동 선택.
@@ -318,7 +319,7 @@ python src/evaluation/labeled_eval.py --category fire,smoke --limit 50
 
 ```
 results/eval_labeled_20260529_092921/
-├── eval.md / eval.csv                  # 카테고리 × {TP/FN/TN/FP, 오탐감소율, 정탐률}
+├── eval.md / eval.csv                  # 카테고리 × {TP/FN/TN/FP, 오탐감소율, 정탐유지율}
 ├── manifest.csv                        # 오분류 케이스 메타
 ├── fp/{category}/*.jpg                 # label=false 인데 모델이 yes (필터 실패)
 └── fn/{category}/*.jpg                 # label=true 인데 모델이 no (정탐 놓침)
@@ -338,7 +339,7 @@ python src/evaluation/sweep.py --limit 50                   # 빠른 샘플 (카
 python src/evaluation/sweep.py --models 0.8B,9B             # 부분집합 (단축 매칭)
 python src/evaluation/sweep.py --category falldown,fire,smoke   # 특정 카테고리만
 
-# 라벨 모드 — 오탐감소율과 정탐률을 모델별로 동시 비교
+# 라벨 모드 — 오탐감소율과 정탐유지율을 모델별로 동시 비교
 python src/evaluation/sweep.py --eval labeled
 ```
 

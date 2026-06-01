@@ -128,14 +128,15 @@ def fmt_rate(r: float) -> str:
 
 def render(agg: dict, elapsed: float, total: int):
     """표 출력 + 행 데이터(리스트) 반환.
-    columns: category,total,pos,neg,tp,fn,tn,fp,unparsed,error,specificity,recall
+    columns: category,total,positives,negatives,tp,fn,tn,fp,unparsed,error,
+             fp_reduction_pct,retention_pct,loss_pct
     """
     print(f"완료: {total}장 / {elapsed:.1f}s ({total/elapsed:.1f} img/s)\n")
     print("=== 카테고리별 결과 ===")
     print(f"{'카테고리':>10} {'총수':>5} {'true':>4} {'false':>5} "
           f"{'TP':>4} {'FN':>4} {'TN':>5} {'FP':>4} "
-          f"{'미파싱':>5} {'에러':>4} {'오탐감소율':>10} {'정탐률':>8}")
-    print("-" * 90)
+          f"{'미파싱':>5} {'에러':>4} {'오탐감소율':>10} {'정탐유지율':>10} {'손실률':>7}")
+    print("-" * 102)
 
     rows = []
     grand = {"tp": 0, "fn": 0, "tn": 0, "fp": 0, "unparsed": 0, "error": 0}
@@ -145,34 +146,39 @@ def render(agg: dict, elapsed: float, total: int):
         pos = d["tp"] + d["fn"]
         neg = d["tn"] + d["fp"]
         tot = pos + neg + d["unparsed"] + d["error"]
-        spec = rate(d["tn"], d["tn"] + d["fp"])  # specificity
-        rec = rate(d["tp"], d["tp"] + d["fn"])   # recall
+        spec = rate(d["tn"], d["tn"] + d["fp"])  # 오탐감소율
+        ret = rate(d["tp"], pos)                 # 정탐유지율
+        loss = rate(d["fn"], pos)                # 손실률
         print(f"{cat:>10} {tot:>5} {pos:>4} {neg:>5} "
               f"{d['tp']:>4} {d['fn']:>4} {d['tn']:>5} {d['fp']:>4} "
               f"{d['unparsed']:>5} {d['error']:>4} "
-              f"{fmt_rate(spec):>10} {fmt_rate(rec):>8}")
+              f"{fmt_rate(spec):>10} {fmt_rate(ret):>10} {fmt_rate(loss):>7}")
         rows.append([cat, tot, pos, neg, d["tp"], d["fn"], d["tn"], d["fp"],
                      d["unparsed"], d["error"],
                      None if spec != spec else round(spec, 1),
-                     None if rec != rec else round(rec, 1)])
+                     None if ret != ret else round(ret, 1),
+                     None if loss != loss else round(loss, 1)])
 
     gpos = grand["tp"] + grand["fn"]
     gneg = grand["tn"] + grand["fp"]
     gtot = gpos + gneg + grand["unparsed"] + grand["error"]
     gspec = rate(grand["tn"], grand["tn"] + grand["fp"])
-    grec = rate(grand["tp"], grand["tp"] + grand["fn"])
-    print("-" * 90)
+    gret = rate(grand["tp"], gpos)
+    gloss = rate(grand["fn"], gpos)
+    print("-" * 102)
     print(f"{'합계':>10} {gtot:>5} {gpos:>4} {gneg:>5} "
           f"{grand['tp']:>4} {grand['fn']:>4} {grand['tn']:>5} {grand['fp']:>4} "
           f"{grand['unparsed']:>5} {grand['error']:>4} "
-          f"{fmt_rate(gspec):>10} {fmt_rate(grec):>8}")
+          f"{fmt_rate(gspec):>10} {fmt_rate(gret):>10} {fmt_rate(gloss):>7}")
     rows.append(["합계", gtot, gpos, gneg, grand["tp"], grand["fn"],
                  grand["tn"], grand["fp"], grand["unparsed"], grand["error"],
                  None if gspec != gspec else round(gspec, 1),
-                 None if grec != grec else round(grec, 1)])
+                 None if gret != gret else round(gret, 1),
+                 None if gloss != gloss else round(gloss, 1)])
 
-    print(f"\n오탐감소율 = TN/(TN+FP)  (false 라벨 중 모델이 no 라 거른 비율)")
-    print(f"정탐률     = TP/(TP+FN)  (true  라벨 중 모델이 yes 라 유지한 비율)")
+    print(f"\n오탐감소율 = TN / (TN+FP)    (false 라벨 중 모델이 no 라 거른 비율)")
+    print(f"정탐유지율 = TP / positives  (1차 양성 중 2차 VLM 이 유지한 비율)")
+    print(f"손실률     = FN / positives  (= 100 − 정탐유지율, 진짜 사건 놓친 비율)")
     return rows
 
 
@@ -181,7 +187,7 @@ def save(out_dir: Path, rows: list, model: str, args, env: dict, concurrency: in
     out_dir.mkdir(parents=True, exist_ok=True)
     cols = ["category", "total", "positives", "negatives",
             "tp", "fn", "tn", "fp", "unparsed", "error",
-            "fp_reduction_pct", "recall_pct"]
+            "fp_reduction_pct", "retention_pct", "loss_pct"]
 
     with (out_dir / "eval.csv").open("w", newline="") as f:
         w = csv.writer(f)
@@ -189,7 +195,7 @@ def save(out_dir: Path, rows: list, model: str, args, env: dict, concurrency: in
         w.writerows(rows)
 
     with (out_dir / "eval.md").open("w") as f:
-        f.write("# 라벨 기반 오탐감소율 + 정탐률 평가 결과\n\n")
+        f.write("# 라벨 기반 오탐감소율 + 정탐유지율 평가 결과\n\n")
         f.write(f"- 일시: {datetime.now():%Y-%m-%d %H:%M:%S}\n")
         f.write(f"- 모델: {model}\n")
         f.write(f"- 라벨 export: `{export_path}`\n")
@@ -197,7 +203,8 @@ def save(out_dir: Path, rows: list, model: str, args, env: dict, concurrency: in
         f.write(f"- 동시 요청: {concurrency}\n")
         f.write("- 지표 정의:\n")
         f.write("  - **오탐감소율** = `TN / (TN + FP)` (false 라벨 중 모델이 no 라 거른 비율)\n")
-        f.write("  - **정탐률**     = `TP / (TP + FN)` (true  라벨 중 모델이 yes 라 유지한 비율)\n\n")
+        f.write("  - **정탐유지율** = `TP / positives` (1차 양성 중 2차 VLM 이 유지한 비율)\n")
+        f.write("  - **손실률**     = `FN / positives` (= 100 − 정탐유지율)\n\n")
         if env:
             f.write("## 서버 설정 (.env 기준)\n\n")
             f.write("| key | value |\n|---|---|\n")

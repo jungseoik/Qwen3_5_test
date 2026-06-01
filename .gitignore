@@ -221,3 +221,4 @@ nas
 results/
 # Claude Code 로컬 설정 (개인 권한·플러그인·토큰 등이 들어갈 수 있어 커밋 금지)
 .claude/
+nas_poc
