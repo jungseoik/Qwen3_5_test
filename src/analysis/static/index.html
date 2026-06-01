@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>오분류 description 분석</title>
+<style>
+  :root {
+    --bg:#15171c; --panel:#1e2128; --panel2:#23262e; --line:#2c303a;
+    --fg:#e6e8ee; --muted:#8b93a3; --accent:#5b8cff;
+    --true:#34c759; --false:#ff4d4f; --fn:#ff9f0a; --fp:#bf5af2;
+  }
+  * { box-sizing:border-box; }
+  html,body { height:100%; margin:0; }
+  body {
+    background:var(--bg); color:var(--fg); font-family:system-ui,sans-serif;
+    display:flex; flex-direction:column;
+  }
+  header {
+    padding:8px 14px; border-bottom:1px solid var(--line);
+    display:flex; align-items:center; gap:14px; flex-wrap:wrap;
+  }
+  .group { display:flex; align-items:center; gap:6px; }
+  .group > .lbl { color:var(--muted); font-size:12px; margin-right:2px; }
+  .spacer { flex:1; }
+  .pos { color:var(--muted); font-variant-numeric:tabular-nums; font-size:14px; }
+  .chip {
+    background:var(--panel); color:var(--fg); border:1px solid var(--line);
+    border-radius:7px; padding:5px 11px; font-size:13px; cursor:pointer; white-space:nowrap;
+  }
+  .chip:hover { filter:brightness(1.15); }
+  .chip.on { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600; }
+  .chip.kfn.on { background:var(--fn); border-color:var(--fn); }
+  .chip.kfp.on { background:var(--fp); border-color:var(--fp); }
+  .chip small { opacity:.7; margin-left:4px; font-variant-numeric:tabular-nums; }
+
+  main { flex:1; display:flex; min-height:0; }
+  .left, .right { display:flex; flex-direction:column; min-height:0; min-width:0; }
+  .left { flex:1.15; border-right:1px solid var(--line); padding:12px; gap:10px; }
+  .right { flex:1; padding:12px; gap:10px; }
+  .imgwrap {
+    flex:1; min-height:0; display:flex; align-items:center; justify-content:center;
+    background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:6px;
+  }
+  .imgwrap img { max-width:100%; max-height:100%; object-fit:contain; border-radius:6px; }
+  .badges { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .badge { padding:3px 10px; border-radius:14px; font-size:12px; font-weight:600; }
+  .badge.label-true { background:rgba(52,199,89,.18); color:var(--true); border:1px solid var(--true); }
+  .badge.label-false { background:rgba(255,77,79,.18); color:var(--false); border:1px solid var(--false); }
+  .badge.v-yes { background:rgba(52,199,89,.18); color:var(--true); border:1px solid var(--true); }
+  .badge.v-no { background:rgba(255,77,79,.18); color:var(--false); border:1px solid var(--false); }
+  .badge.kind { background:var(--panel2); color:var(--muted); border:1px solid var(--line); }
+  .verdict-note { color:var(--muted); font-size:12px; }
+
+  .sec-title { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.5px; }
+  .promptbox {
+    background:var(--panel); border:1px solid var(--line); border-radius:8px;
+    padding:10px 12px; font-family:ui-monospace,monospace; font-size:12px;
+    color:var(--muted); white-space:pre-wrap; max-height:22vh; overflow:auto;
+  }
+  .desc {
+    flex:1; min-height:0; overflow:auto; background:var(--panel); border:1px solid var(--line);
+    border-radius:10px; padding:14px 16px; font-size:15px; line-height:1.7; white-space:pre-wrap;
+  }
+  .desc.empty { color:var(--muted); font-style:italic; }
+  .toggle { color:var(--accent); font-size:11px; cursor:pointer; text-transform:none; letter-spacing:0; }
+  .toggle:hover { text-decoration:underline; }
+  .toggle.on { color:var(--fn); }
+
+  footer { border-top:1px solid var(--line); }
+  .thumbs {
+    display:flex; gap:6px; overflow-x:auto; padding:8px 10px; align-items:center;
+  }
+  .thumbs img {
+    height:62px; width:auto; border-radius:5px; border:2px solid transparent;
+    cursor:pointer; opacity:.65; flex:0 0 auto;
+  }
+  .thumbs img:hover { opacity:1; }
+  .thumbs img.on { border-color:var(--accent); opacity:1; }
+  .help { padding:6px 12px; color:var(--muted); font-size:12px; display:flex; gap:14px; flex-wrap:wrap; border-top:1px solid var(--line); }
+  kbd {
+    background:var(--panel); border:1px solid var(--line); border-bottom-width:2px;
+    border-radius:5px; padding:0 6px; color:var(--fg); font-family:ui-monospace,monospace; font-size:11px;
+  }
+  #empty { margin:auto; color:var(--muted); }
+</style>
+</head>
+<body>
+  <header>
+    <div class="group"><span class="lbl">모델</span><span id="models"></span></div>
+    <div class="group"><span class="lbl">종류</span><span id="kinds"></span></div>
+    <div class="group"><span class="lbl">카테고리</span><span id="cats"></span></div>
+    <div class="spacer"></div>
+    <div class="pos" id="pos">0 / 0</div>
+  </header>
+
+  <main>
+    <div class="left">
+      <div class="imgwrap"><img id="img" alt=""></div>
+      <div class="badges" id="badges"></div>
+      <div class="verdict-note" id="vnote"></div>
+      <div class="sec-title">base 프롬프트 (yes/no 판정에 사용)</div>
+      <div class="promptbox" id="baseprompt">—</div>
+    </div>
+    <div class="right">
+      <div class="sec-title">description 질문 (영어 생성)</div>
+      <div class="promptbox" id="descprompt">—</div>
+      <div class="sec-title">모델 설명 <span class="toggle" id="langtoggle">[원문 EN 보기]</span></div>
+      <div class="desc" id="desc">—</div>
+    </div>
+  </main>
+
+  <footer>
+    <div class="thumbs" id="thumbs"></div>
+    <div class="help">
+      <span><kbd>←</kbd>/<kbd>→</kbd> 이전·다음</span>
+      <span><kbd>1</kbd>~<kbd>9</kbd> 카테고리 · <kbd>0</kbd> 전체</span>
+      <span><kbd>[</kbd>/<kbd>]</kbd> 모델</span>
+      <span><kbd>f</kbd> FN · <kbd>p</kbd> FP</span>
+      <span><kbd>e</kbd> 한/영 전환</span>
+      <span><kbd>Home</kbd>/<kbd>End</kbd> 처음·끝</span>
+    </div>
+  </footer>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+let META = null;
+let state = { model:null, kind:null, category:"__all__" };
+let items = [];
+let cur = 0;
+let curCase = null;      // 현재 상세 레코드
+let showEn = false;      // 설명 패널: false=한국어, true=영어 원문
+
+async function boot() {
+  META = await (await fetch("/api/index")).json();
+  if (!META.models.length) { document.body.innerHTML = "<div id='empty'>표시할 모델이 없습니다.</div>"; return; }
+  state.model = META.models[0].name;
+  renderModels();
+  renderCats();
+  pickDefaultKind();
+  await loadCases();
+}
+
+function modelMeta(name) { return META.models.find(m => m.name === name); }
+
+function availableKinds(name) {
+  const m = modelMeta(name);
+  // FN, FP 우선 순서로 노출, 그 외(tp/tn)도 있으면 뒤에.
+  const order = ["fn", "fp", "tp", "tn"];
+  return order.filter(k => m && m.counts[k]);
+}
+
+function kindCount(name, kind) {
+  const m = modelMeta(name);
+  if (!m || !m.counts[kind]) return 0;
+  return Object.values(m.counts[kind]).reduce((a,b)=>a+b,0);
+}
+
+function catCount(name, kind, cat) {
+  const m = modelMeta(name);
+  if (!m || !m.counts[kind]) return 0;
+  if (cat === "__all__") return kindCount(name, kind);
+  return m.counts[kind][cat] || 0;
+}
+
+function pickDefaultKind() {
+  const ks = availableKinds(state.model);
+  if (!ks.includes(state.kind)) state.kind = ks[0] || null;
+  renderKinds();
+}
+
+function renderModels() {
+  $("models").innerHTML = "";
+  for (const m of META.models) {
+    const b = document.createElement("span");
+    b.className = "chip" + (m.name === state.model ? " on" : "");
+    b.innerHTML = `${m.name}<small>${m.total}</small>`;
+    b.onclick = () => selectModel(m.name);
+    $("models").appendChild(b);
+  }
+}
+
+function renderKinds() {
+  $("kinds").innerHTML = "";
+  for (const k of availableKinds(state.model)) {
+    const b = document.createElement("span");
+    const cls = k === "fn" ? "kfn" : k === "fp" ? "kfp" : "";
+    b.className = `chip ${cls}` + (k === state.kind ? " on" : "");
+    const lbl = (META.kind_label[k] || k.toUpperCase());
+    b.innerHTML = `${lbl}<small>${kindCount(state.model, k)}</small>`;
+    b.onclick = () => selectKind(k);
+    $("kinds").appendChild(b);
+  }
+}
+
+function renderCats() {
+  $("cats").innerHTML = "";
+  const cats = ["__all__", ...META.categories];
+  cats.forEach((c) => {
+    const b = document.createElement("span");
+    b.className = "chip" + (c === state.category ? " on" : "");
+    const name = c === "__all__" ? "전체" : c;
+    b.dataset.cat = c;
+    b.innerHTML = `${name}<small class="cc"></small>`;
+    b.onclick = () => selectCat(c);
+    $("cats").appendChild(b);
+  });
+  refreshCatCounts();
+}
+
+function refreshCatCounts() {
+  document.querySelectorAll("#cats .chip").forEach(ch => {
+    const c = ch.dataset.cat;
+    ch.querySelector(".cc").textContent = catCount(state.model, state.kind, c);
+    ch.classList.toggle("on", c === state.category);
+  });
+}
+
+async function selectModel(name) {
+  state.model = name; renderModels(); pickDefaultKind(); renderCats(); await loadCases();
+}
+async function selectKind(k) { state.kind = k; renderKinds(); refreshCatCounts(); await loadCases(); }
+async function selectCat(c) { state.category = c; refreshCatCounts(); await loadCases(); }
+
+async function loadCases() {
+  if (!state.kind) { items = []; renderEmpty(); return; }
+  const q = new URLSearchParams({ model: state.model, kind: state.kind, category: state.category });
+  const r = await (await fetch("/api/cases?" + q)).json();
+  items = r.items || [];
+  cur = 0;
+  renderThumbs();
+  if (!items.length) { renderEmpty(); return; }
+  await loadCase();
+}
+
+function renderEmpty() {
+  $("pos").textContent = "0 / 0";
+  $("thumbs").innerHTML = "";
+  $("img").removeAttribute("src");
+  $("badges").innerHTML = "";
+  $("vnote").textContent = "이 조건에 해당하는 케이스가 없습니다.";
+  $("baseprompt").textContent = "—";
+  $("descprompt").textContent = "—";
+  $("desc").textContent = "—"; $("desc").classList.add("empty");
+}
+
+function imgUrl(id) {
+  return "/img?" + new URLSearchParams({ model: state.model, id });
+}
+
+function renderThumbs() {
+  const t = $("thumbs"); t.innerHTML = "";
+  items.forEach((it, i) => {
+    const im = document.createElement("img");
+    im.loading = "lazy";
+    im.src = imgUrl(it.id);
+    im.title = `${it.category} · ${it.id}`;
+    im.onclick = () => { cur = i; loadCase(); };
+    t.appendChild(im);
+  });
+}
+
+function markThumb() {
+  const ims = $("thumbs").children;
+  for (let i = 0; i < ims.length; i++) ims[i].classList.toggle("on", i === cur);
+  if (ims[cur]) ims[cur].scrollIntoView({ inline: "center", block: "nearest" });
+}
+
+async function loadCase() {
+  const it = items[cur];
+  $("pos").textContent = `${cur + 1} / ${items.length}`;
+  $("img").src = imgUrl(it.id);
+  markThumb();
+  const c = await (await fetch("/api/case?" + new URLSearchParams({ model: state.model, id: it.id }))).json();
+
+  const lab = c.label === "true" ? "정답: 사건 있음(true)" : "정답: 사건 아님(false)";
+  const ver = c.base_verdict === "yes" ? "모델 판정: yes(유지)" : c.base_verdict === "no" ? "모델 판정: no(걸러냄)" : `모델 판정: ${c.base_verdict}`;
+  $("badges").innerHTML =
+    `<span class="badge kind">${META.kind_label[c.kind] || c.kind}</span>` +
+    `<span class="badge ${c.category}">${c.category}</span>` +
+    `<span class="badge ${c.label === "true" ? "label-true" : "label-false"}">${lab}</span>` +
+    `<span class="badge ${c.base_verdict === "yes" ? "v-yes" : "v-no"}">${ver}</span>`;
+  $("vnote").textContent = noteFor(c);
+  $("baseprompt").textContent = c.base_prompt || "—";
+  $("descprompt").textContent = c.describe_prompt || "—";
+  curCase = c;
+  renderDesc();
+}
+
+function renderDesc() {
+  const c = curCase || {};
+  const ko = (c.description_ko || "").trim();
+  const en = (c.description || "").trim();
+  // 한국어 우선. 한국어가 없거나 에러면 영어로 폴백.
+  const koUsable = ko && !ko.startsWith("<error");
+  const useEn = showEn || !koUsable;
+  const text = useEn ? (en || "(설명 없음)") : ko;
+  $("desc").textContent = text || "(설명 없음)";
+  $("desc").classList.toggle("empty", !text);
+  const tg = $("langtoggle");
+  if (useEn) { tg.textContent = "[한국어 보기]"; tg.classList.add("on"); }
+  else { tg.textContent = "[원문 EN 보기]"; tg.classList.remove("on"); }
+  if (!koUsable && !showEn) tg.textContent = "[한국어 번역 없음 · EN 표시]";
+}
+
+function toggleLang() { showEn = !showEn; renderDesc(); }
+
+function noteFor(c) {
+  if (c.kind === "fn") return "→ 진짜 사건인데 모델이 no 로 걸러 정탐을 놓침. 아래 설명에서 모델이 사건을 봤는지 확인.";
+  if (c.kind === "fp") return "→ 오탐인데 모델이 yes 로 통과시킴. 아래 설명에서 무엇을 사건으로 오인했는지 확인.";
+  return "";
+}
+
+function go(i) { if (!items.length) return; cur = Math.max(0, Math.min(items.length - 1, i)); loadCase(); }
+
+function cycleModel(dir) {
+  const names = META.models.map(m => m.name);
+  let i = names.indexOf(state.model);
+  i = (i + dir + names.length) % names.length;
+  selectModel(names[i]);
+}
+
+document.addEventListener("keydown", (e) => {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  switch (e.key) {
+    case "ArrowRight": go(cur + 1); break;
+    case "ArrowLeft":  go(cur - 1); break;
+    case "Home": go(0); break;
+    case "End":  go(items.length - 1); break;
+    case "[": cycleModel(-1); break;
+    case "]": cycleModel(1); break;
+    case "f": case "F": if (availableKinds(state.model).includes("fn")) selectKind("fn"); break;
+    case "p": case "P": if (availableKinds(state.model).includes("fp")) selectKind("fp"); break;
+    case "e": case "E": toggleLang(); break;
+    case "0": selectCat("__all__"); break;
+    default:
+      if (/^[1-9]$/.test(e.key)) {
+        const idx = parseInt(e.key, 10) - 1;
+        if (idx < META.categories.length) selectCat(META.categories[idx]);
+        else return;
+      } else return;
+  }
+  e.preventDefault();
+});
+
+$("langtoggle").addEventListener("click", toggleLang);
+boot();
+</script>
+</body>
+</html>

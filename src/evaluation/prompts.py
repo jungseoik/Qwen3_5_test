@@ -135,3 +135,71 @@ DEFAULT_PROMPT = (
 
 def get_prompt(category: str) -> str:
     return PROMPTS.get(category, DEFAULT_PROMPT)
+
+
+# ---------------------------------------------------------------------------
+# description(진단) 프롬프트
+#
+# 위 PROMPTS 는 yes/no 한 토큰만 받아 "왜 그렇게 판정했는가" 를 알 수 없다.
+# describe_eval.py 는 오분류(fp/fn) 케이스에 대해 모델이 장면을 어떻게 이해했는지
+# 풀어 설명(묘사)하게 해, 인식 실패 vs 프롬프트 과민/둔감을 사람이 진단하게 한다.
+#
+# 생성 언어는 영어다. 작은 모델은 한국어를 직접 생성하면 글자가 깨지는 경우가 있어,
+# 영어로 묘사를 받은 뒤 같은 멀티링궐 서버로 한국어 번역(translate)해 관리한다
+# (TRANSLATE_PROMPT 참고). 프롬프트는 오직 "보이는 것을 묘사" 하는 데 집중하며,
+# 판정 단어(yes/no)나 출력 언어 지시는 넣지 않는다. 길이 제한도 두지 않는다.
+# ---------------------------------------------------------------------------
+
+FALLDOWN_DESCRIBE = (
+    "Describe the person or people in this image in detail. Cover:\n"
+    "- how many people are present and the posture of each "
+    "(standing, walking, sitting, crouching, kneeling, bending, lying down, sprawled, etc.)\n"
+    "- whether each posture looks controlled and intentional, or collapsed and off-balance\n"
+    "- body balance, any support (leaning on a wall, floor, or object), and limb orientation\n"
+    "- any visual evidence that someone has fallen, and what suggests it"
+)
+
+FIRE_DESCRIBE = (
+    "Describe what is visible in this image in detail. Cover:\n"
+    "- whether there is any actual burning flame, fire, or active combustion, and if so where and what it looks like\n"
+    "- anything that may look like fire but is not "
+    "(lights, headlights, sunlight, reflections, sunset glow, fire trucks or extinguishers, smoke without flame)\n"
+    "- the overall color and brightness of the scene and anything that could be mistaken for flames"
+)
+
+SMOKE_DESCRIBE = (
+    "Describe whether smoke is visible in this image in detail. Cover:\n"
+    "- whether real smoke is present, and if so its color (black, white, or gray) and density\n"
+    "- where the smoke originates (its source point) and the direction and shape in which it spreads\n"
+    "- distinguish real smoke from things that merely resemble it: clouds in the sky, natural fog, "
+    "sea fog, mist, haze, steam, lens blur, condensation, water droplets, glare, or overexposure\n"
+    "- whether the whole frame is hazy, or there is localized smoke coming from a specific spot"
+)
+
+# violence 는 base PROMPTS 에는 있으나 라벨 평가 대상이 아니라 description 도 기본 카테고리에선 미사용.
+VIOLENCE_DESCRIBE = (
+    "Describe the interaction between the people in this image in detail. Cover:\n"
+    "- how many people are present and what they are doing\n"
+    "- whether there is real physical violence (punching, kicking, pushing, choking) "
+    "or ordinary behavior (talking, shaking hands, hugging, exercising, playing)\n"
+    "- anything that could be mistaken for violence"
+)
+
+DESCRIBE_PROMPTS = {
+    "fire": FIRE_DESCRIBE,
+    "smoke": SMOKE_DESCRIBE,
+    "falldown": FALLDOWN_DESCRIBE,
+    "violence": VIOLENCE_DESCRIBE,
+}
+
+DEFAULT_DESCRIBE_PROMPT = (
+    "Describe what is visible in this image in detail, including any abnormal "
+    "situation or safety hazard if present."
+)
+
+
+def get_describe_prompt(category: str) -> str:
+    return DESCRIBE_PROMPTS.get(category, DEFAULT_DESCRIBE_PROMPT)
+
+# 한국어 번역은 vLLM 자기번역 대신 Google Gemini API 로 한다 (translate.py 참고).
+# 작은 모델의 한국어 직생성 깨짐을 피하고 품질을 일관되게 유지하기 위함이다.

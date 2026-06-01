@@ -56,13 +56,25 @@ def cache_has_weights(model_id: str) -> bool:
     return any(d.glob("snapshots/*/*.safetensors"))
 
 
-def compose(cmd: list, model_id: str = None) -> int:
-    """docker compose 명령 실행 (선택적 VLLM_MODEL override)."""
+def compose(cmd: list, model_id: str = None, extra_env: dict = None) -> int:
+    """docker compose 명령 실행 (선택적 VLLM_MODEL + 추가 env override).
+
+    extra_env 는 .env 를 건드리지 않고 그 기동에만 적용하는 shell-env override.
+    compose 변수 우선순위가 shell env > .env 이므로 여기 넣은 값이 .env 를 덮는다
+    (예: describe 실행 시 MAX_NUM_SEQS/MAX_MODEL_LEN 만 다르게 띄우기).
+    """
     env = os.environ.copy()
     if model_id:
         env["VLLM_MODEL"] = model_id
+    if extra_env:
+        env.update({k: str(v) for k, v in extra_env.items()})
     full = ["docker", "compose"] + cmd
-    note = f"   (VLLM_MODEL={model_id})" if model_id else ""
+    notes = []
+    if model_id:
+        notes.append(f"VLLM_MODEL={model_id}")
+    if extra_env:
+        notes.extend(f"{k}={v}" for k, v in extra_env.items())
+    note = f"   ({', '.join(notes)})" if notes else ""
     print(f"$ {' '.join(full)}{note}", flush=True)
     return subprocess.run(full, cwd=REPO_ROOT, env=env).returncode
 
