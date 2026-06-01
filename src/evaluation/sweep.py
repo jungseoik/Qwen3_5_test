@@ -40,6 +40,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 RESULTS_DIR = REPO_ROOT / "results"
 HF_CACHE_HUB = Path.home() / ".cache" / "huggingface" / "hub"
 FP_REDUCTION = REPO_ROOT / "src" / "evaluation" / "fp_reduction.py"
+LABELED_EVAL = REPO_ROOT / "src" / "evaluation" / "labeled_eval.py"
 
 
 def model_dirname(model_id: str) -> str:
@@ -105,14 +106,14 @@ def parse_models(s: str) -> list:
 
 
 def run_eval(model_id: str, sweep_dir: Path, args) -> dict:
-    """단일 모델 평가를 subprocess 로 fp_reduction.py 호출.
-    returns: {"status": "ok"|"failed"|"no_output", "rows": list[dict] (csv 행)}
+    """단일 모델 평가를 subprocess 로 호출 (fp_reduction.py 또는 labeled_eval.py).
+    --eval 에 따라 진입점이 바뀐다. returns: {"status": ..., "rows": csv 행}
     """
     model_dir = sweep_dir / model_dirname(model_id)
     model_dir.mkdir(parents=True, exist_ok=True)
-    # 모델 id를 fp_reduction 에 명시적으로 전달.
-    # 안 그러면 fp_reduction 이 .env 의 VLLM_MODEL(=원래 값)을 들고 요청 → 서버와 불일치로 전부 error.
-    cmd = [sys.executable, str(FP_REDUCTION),
+    script = LABELED_EVAL if args.eval == "labeled" else FP_REDUCTION
+    # 모델 id 를 명시 전달 — 안 그러면 .env 의 VLLM_MODEL 을 들고 요청 → 서버와 불일치.
+    cmd = [sys.executable, str(script),
            "--out", str(model_dir), "--url", args.url, "--model", model_id]
     if args.limit:
         cmd += ["--limit", str(args.limit)]
@@ -122,8 +123,10 @@ def run_eval(model_id: str, sweep_dir: Path, args) -> dict:
         cmd += ["--concurrency", str(args.concurrency)]
     if args.collect:
         cmd += ["--collect", args.collect]
+    if args.eval == "labeled" and args.path:
+        cmd += ["--path", args.path]
 
-    print(f"\n=== 평가 시작: {model_id} ===", flush=True)
+    print(f"\n=== 평가 시작: {model_id} ({args.eval}) ===", flush=True)
     rc = subprocess.run(cmd, cwd=REPO_ROOT).returncode
     if rc != 0:
         return {"status": "failed", "rc": rc}
@@ -135,8 +138,22 @@ def run_eval(model_id: str, sweep_dir: Path, args) -> dict:
     return {"status": "ok", "rows": rows}
 
 
-def write_summary(sweep_dir: Path, ordered_models: list, results: dict, categories: list):
-    """모델 × 카테고리 매트릭스 요약 (summary.md, summary.csv) 작성."""
+def _matrix_row(model: str, status_ok: bool, status: str, categories: list,
+                by_cat: dict, col: str) -> str:
+    """summary md 의 한 행 (모델 × 카테고리) 생성. col 은 csv 컬럼명."""
+    if not status_ok:
+        return (f"| {model} | " + " | ".join(["-"] * len(categories))
+                + f" | - | `{status}` |\n")
+    cells = []
+    for c in categories:
+        v = by_cat.get(c, {}).get(col, "")
+        cells.append(f"{v}%" if v else "-")
+    total = by_cat.get("합계", {}).get(col, "-")
+    return f"| {model} | " + " | ".join(cells) + f" | **{total}%** | ok |\n"
+
+
+def write_summary_fp(sweep_dir: Path, ordered_models: list, results: dict, categories: list):
+    """기존 fp 모드: 오탐감소율 1개 표."""
     md_path = sweep_dir / "summary.md"
     csv_path = sweep_dir / "summary.csv"
 
@@ -155,31 +172,74 @@ def write_summary(sweep_dir: Path, ordered_models: list, results: dict, categori
                             row["unparsed"], row["error"], row["fp_reduction_pct"]])
 
     with md_path.open("w") as f:
-        f.write("# 모델 sweep 평가 요약\n\n")
+        f.write("# 모델 sweep 평가 요약 (오탐감소율)\n\n")
         f.write(f"- 일시: {datetime.now():%Y-%m-%d %H:%M:%S}\n")
         f.write(f"- sweep 폴더: `{sweep_dir.name}`\n")
         ok = [m for m in ordered_models if results.get(m, {}).get("status") == "ok"]
         f.write(f"- 모델: 평가 {len(ok)}개 / 전체 {len(ordered_models)}개\n\n")
         f.write("## 오탐감소율 (%)\n\n")
-        header = "| 모델 | " + " | ".join(categories) + " | **전체** | 상태 |"
-        sep = "|---|" + "|".join(["---"] * (len(categories) + 2)) + "|"
-        f.write(header + "\n" + sep + "\n")
+        header = "| 모델 | " + " | ".join(categories) + " | **전체** | 상태 |\n"
+        sep = "|---|" + "|".join(["---"] * (len(categories) + 2)) + "|\n"
+        f.write(header + sep)
+        for model in ordered_models:
+            res = results.get(model, {})
+            ok = res.get("status") == "ok"
+            by_cat = {r["category"]: r for r in res.get("rows", [])} if ok else {}
+            f.write(_matrix_row(model, ok, res.get("status", "unknown"),
+                                categories, by_cat, "fp_reduction_pct"))
+        f.write("\n각 모델 상세는 같은 폴더의 `{모델명}/eval.md` / `manifest.csv` "
+                "그리고 못 거른 케이스 썸네일 (`{모델명}/yes/{카테고리}/`) 을 참고하세요.\n")
+
+    return md_path, csv_path
+
+
+def write_summary_labeled(sweep_dir: Path, ordered_models: list, results: dict, categories: list):
+    """라벨 모드: 오탐감소율 + 정탐률 두 표 + 카운트."""
+    md_path = sweep_dir / "summary.md"
+    csv_path = sweep_dir / "summary.csv"
+
+    csv_cols = ["model", "category", "total", "positives", "negatives",
+                "tp", "fn", "tn", "fp", "unparsed", "error",
+                "fp_reduction_pct", "recall_pct"]
+    with csv_path.open("w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(csv_cols)
         for model in ordered_models:
             res = results.get(model, {})
             if res.get("status") != "ok":
-                f.write(f"| {model} | " + " | ".join(["-"] * len(categories))
-                        + f" | - | `{res.get('status', 'unknown')}` |\n")
                 continue
-            by_cat = {r["category"]: r for r in res["rows"]}
-            cells = []
-            for c in categories:
-                v = by_cat.get(c, {}).get("fp_reduction_pct", "")
-                cells.append(f"{v}%" if v else "-")
-            total_pct = by_cat.get("합계", {}).get("fp_reduction_pct", "-")
-            f.write(f"| {model} | " + " | ".join(cells)
-                    + f" | **{total_pct}%** | ok |\n")
-        f.write("\n각 모델 상세는 같은 폴더의 `{모델명}/eval.md` 와 `manifest.csv`, "
-                "그리고 못 거른 케이스 썸네일 (`{모델명}/yes/{카테고리}/`) 을 참고하세요.\n")
+            for row in res["rows"]:
+                w.writerow([model, row["category"], row["total"],
+                            row["positives"], row["negatives"],
+                            row["tp"], row["fn"], row["tn"], row["fp"],
+                            row["unparsed"], row["error"],
+                            row["fp_reduction_pct"], row["recall_pct"]])
+
+    def write_table(f, title: str, col: str):
+        f.write(f"## {title}\n\n")
+        f.write("| 모델 | " + " | ".join(categories) + " | **전체** | 상태 |\n")
+        f.write("|---|" + "|".join(["---"] * (len(categories) + 2)) + "|\n")
+        for model in ordered_models:
+            res = results.get(model, {})
+            ok = res.get("status") == "ok"
+            by_cat = {r["category"]: r for r in res.get("rows", [])} if ok else {}
+            f.write(_matrix_row(model, ok, res.get("status", "unknown"),
+                                categories, by_cat, col))
+        f.write("\n")
+
+    with md_path.open("w") as f:
+        f.write("# 모델 sweep 평가 요약 (라벨 모드)\n\n")
+        f.write(f"- 일시: {datetime.now():%Y-%m-%d %H:%M:%S}\n")
+        f.write(f"- sweep 폴더: `{sweep_dir.name}`\n")
+        ok = [m for m in ordered_models if results.get(m, {}).get("status") == "ok"]
+        f.write(f"- 모델: 평가 {len(ok)}개 / 전체 {len(ordered_models)}개\n")
+        f.write("- **오탐감소율** = `TN/(TN+FP)` (false 라벨 중 모델이 no 라 거른 비율)\n")
+        f.write("- **정탐률**     = `TP/(TP+FN)` (true  라벨 중 모델이 yes 라 유지한 비율)\n\n")
+        write_table(f, "오탐감소율 (%) — 모델이 오탐을 얼마나 잘 거르는가", "fp_reduction_pct")
+        write_table(f, "정탐률 (%) — 모델이 진짜 사건을 얼마나 잘 유지하는가", "recall_pct")
+        f.write("각 모델 상세는 같은 폴더의 `{모델명}/eval.md` / `manifest.csv`, "
+                "그리고 오분류 썸네일 `{모델명}/fp/{카테고리}/` (놓친 오탐), "
+                "`{모델명}/fn/{카테고리}/` (놓친 정탐) 을 참고하세요.\n")
 
     return md_path, csv_path
 
@@ -193,13 +253,19 @@ def main():
     ap.add_argument("--category", default=None, help="평가 카테고리 콤마 구분")
     ap.add_argument("--concurrency", type=int, default=None,
                     help="동시 요청 수 (생략 시 .env MAX_NUM_SEQS)")
-    ap.add_argument("--collect", default="yes",
-                    help='실패 케이스 수집 모드 (yes/all/none/...)  기본: yes')
+    ap.add_argument("--collect", default=None,
+                    help='실패 케이스 수집 모드. fp 모드: yes/all/none / 라벨 모드: fp,fn 등. '
+                         '생략 시 평가 모듈 디폴트 사용')
     ap.add_argument("--url", default="http://localhost:8000")
     ap.add_argument("--load-timeout", type=int, default=900,
                     help="모델 로딩 헬스체크 대기(초). 기본 900 (15분)")
     ap.add_argument("--no-require-cached", dest="require_cached", action="store_false",
                     help="HF 캐시에 weight 없어도 시도 (기본은 자동 스킵)")
+    ap.add_argument("--eval", choices=["fp", "labeled"], default="fp",
+                    help="평가 종류. fp=기존 오탐감소율 (기본), labeled=라벨 기반 오탐감소율+정탐률")
+    ap.add_argument("--path", default=None,
+                    help="라벨 모드 전용. labeled_eval 의 --path 로 전달 "
+                         "(생략 시 최신 results/labeling/export/export_* 자동)")
     ap.set_defaults(require_cached=True)
     args = ap.parse_args()
 
@@ -217,12 +283,14 @@ def main():
     if not available:
         sys.exit("[에러] 평가 가능한 모델이 없습니다.")
 
-    sweep_dir = RESULTS_DIR / f"sweep_{datetime.now():%Y%m%d_%H%M%S}"
+    sweep_prefix = "sweep_labeled" if args.eval == "labeled" else "sweep"
+    sweep_dir = RESULTS_DIR / f"{sweep_prefix}_{datetime.now():%Y%m%d_%H%M%S}"
     sweep_dir.mkdir(parents=True, exist_ok=True)
     print(f"sweep 폴더 : {sweep_dir}")
+    print(f"평가 종류  : {args.eval}")
     print(f"평가 대상  : {available}")
     print(f"공통 옵션  : limit={args.limit or '전수'}, "
-          f"concurrency={args.concurrency or '.env'}, collect={args.collect}\n")
+          f"concurrency={args.concurrency or '.env'}, collect={args.collect or '(모듈 기본)'}\n")
 
     # 모든 평가 대상에 결과 슬롯 준비 (스킵 모델도 표에 표시).
     results = {m: {"status": "skipped"} for m in skipped}
@@ -253,7 +321,8 @@ def main():
         compose(["down"])
     finally:
         ordered = available + skipped
-        md, csvf = write_summary(sweep_dir, ordered, results, categories_seen)
+        writer = write_summary_labeled if args.eval == "labeled" else write_summary_fp
+        md, csvf = writer(sweep_dir, ordered, results, categories_seen)
         print(f"\n=== sweep 종료 ===")
         print(f"  요약 md  : {md}")
         print(f"  요약 csv : {csvf}")

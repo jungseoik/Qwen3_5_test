@@ -118,9 +118,30 @@ results/
 | Ctrl+C | 현재 컨테이너 `docker compose down`, 부분 결과로 `summary.md` 작성 |
 | sweep 정상 종료 | 마지막 모델 그대로 띄워둠 (이어서 추가 실험 바로 가능) |
 
+## 평가 종류 — `--eval`
+
+| 값 | 호출 모듈 | 결과 폴더 prefix | summary 표 |
+|---|---|---|---|
+| `fp` (기본) | `fp_reduction.py` | `sweep_<TS>/` | 오탐감소율 1개 |
+| `labeled` | `labeled_eval.py` | `sweep_labeled_<TS>/` | 오탐감소율 + 정탐률 2개 (양면 비교) |
+
+```bash
+# 기존 FP 가정 모드 (변화 없음)
+python src/evaluation/sweep.py
+
+# 라벨 기반 모드 (오탐감소율 + 정탐률 동시)
+python src/evaluation/sweep.py --eval labeled
+
+# 라벨 데이터 위치 직접 지정 (생략 시 최신 results/labeling/export/export_* 자동)
+python src/evaluation/sweep.py --eval labeled --path /다른/경로
+```
+
+라벨 모드 `summary.md` 는 모델별로 두 지표를 나란히 표시해서 **"오탐을 줄이면서 정탐을 얼마나 유지/손해 보는지"** 한눈에 비교할 수 있습니다. 라벨 평가 자체는 [labeled_eval.md](labeled_eval.md) 참고.
+
 ## 다른 도구와의 관계
 
-- `src/evaluation/fp_reduction.py` — 단일 모델 평가 (sweep 이 subprocess 로 호출)
+- `src/evaluation/fp_reduction.py` — 단일 모델 FP 평가 (기본 sweep 이 subprocess 로 호출)
+- `src/evaluation/labeled_eval.py` — 단일 모델 라벨 평가 (`--eval labeled` 시 호출)
 - `src/evaluation/prompts.py` — 카테고리별 프롬프트 (sweep 의 모든 모델이 공유)
 - `src/evaluation/models.py` — sweep 대상 모델 리스트
 - `.env` — 서버 공통 설정 (sweep 은 `VLLM_MODEL` 만 일시 override)

@@ -92,6 +92,10 @@ def build_payload(model: str, img_path: Path, prompt: str, max_tokens: int) -> b
             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
             {"type": "text", "text": prompt},
         ]}],
+        # Qwen3 계열 4B+ 는 기본적으로 reasoning(thinking) 모드 ON 이라 답 앞에
+        # <think>...</think> 가 먼저 나옴. max_tokens=1 이면 첫 thinking 토큰만 잡혀 unparsed.
+        # 이 옵션으로 thinking 비활성화 → 바로 yes/no 출력. (지원 안 하는 작은 모델은 무시)
+        "chat_template_kwargs": {"enable_thinking": False},
     }).encode()
 
 
