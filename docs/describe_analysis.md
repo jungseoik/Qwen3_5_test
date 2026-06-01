@@ -78,16 +78,21 @@ python src/evaluation/describe_eval.py --from <폴더> --category smoke --limit 
 
 ### 다중 모델 — `describe_sweep.py`
 
-`sweep_labeled_*` 폴더의 각 모델을 차례로 재기동하며 `describe_eval.py` 를 돌립니다. 결과는 각 모델 폴더 `describe/` 에 쌓입니다.
+`sweep_labeled_*` 폴더의 각 모델을 차례로 재기동하며 영어 description 을 만들고, **전 모델 생성이 끝난 뒤 한 번에 Gemini 배치 번역**을 돌립니다(생성=vLLM/GPU, 번역=Gemini 를 분리해 빠름). 결과는 각 모델 폴더 `describe/` 에 쌓입니다.
 
 ```bash
 python src/evaluation/describe_sweep.py --from results/sweep_labeled_20260529_095220
 
-# 일부 모델 / FN만
+# 일부 모델 / FN만 / 번역 끄고 영어만
 python src/evaluation/describe_sweep.py --from <폴더> --models 4B,9B --kind fn
+python src/evaluation/describe_sweep.py --from <폴더> --no-translate
 ```
 
-`manifest.csv` 가 없는 모델, HF 캐시에 weight 가 없는 모델은 자동 스킵합니다. 종료 시 마지막 모델은 띄워둡니다(`sweep.py` 와 동일 정책).
+동작은 2단계입니다:
+1. **영어 생성** — 모델마다 재기동(`.env.describe` 오버레이 적용) → `describe_eval --no-translate` 로 영어 description 만.
+2. **일괄 번역** — 전 모델 생성 후, 각 모델 결과를 Gemini 배치(`--batch-size`)로 한 번에 번역.
+
+`manifest.csv` 가 없는 모델, HF 캐시에 weight 가 없는 모델은 자동 스킵합니다. 종료 시 마지막 모델은 띄워둡니다(`sweep.py` 와 동일 정책). Gemini 키가 없으면 번역 단계는 자동 생략됩니다.
 
 `describe_sweep` 전용 인자:
 
@@ -95,8 +100,10 @@ python src/evaluation/describe_sweep.py --from <폴더> --models 4B,9B --kind fn
 |---|---|---|
 | `--max-num-seqs` | 서버 `MAX_NUM_SEQS` override (`.env.describe` 보다 우선) | `.env.describe`→`.env` |
 | `--max-model-len` | 서버 `MAX_MODEL_LEN` override | 〃 |
-| `--concurrency` | 클라이언트 동시 요청 수 | 적용된 `MAX_NUM_SEQS` 에 자동 일치 |
-| `--max-tokens` / `--gemini-model` / `--no-translate` | describe_eval 로 전달 | 512 / .env / 번역 on |
+| `--concurrency` | 클라이언트(vLLM) 동시 요청 수 | 적용된 `MAX_NUM_SEQS` 에 자동 일치 |
+| `--batch-size` | 번역 배치 크기 (한 Gemini 호출당 건수) | `50` |
+| `--translate-concurrency` | 동시 번역 묶음 수 | `4` |
+| `--max-tokens` / `--gemini-model` / `--no-translate` | 영어 토큰수 / 번역 모델 / 번역 생략 | 512 / .env / 번역 on |
 
 ### 서버 튜닝 오버레이 (`.env.describe`)
 

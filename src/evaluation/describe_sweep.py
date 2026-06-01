@@ -8,12 +8,14 @@
 오케스트레이션(모델 교체·헬스체크·모델 단축 매칭)은 sweep.py 의 헬퍼를 그대로 재사용한다
 (labeled_eval ↔ fp_reduction 과 동일한 의존 방향).
 
-흐름 (모델마다):
-  1) docker compose down                        (이전 모델 종료)
-  2) VLLM_MODEL override 하여 docker compose up -d
-  3) /health 폴링                               (모델 로딩 대기)
-  4) subprocess 로 describe_eval.py 실행         (그 모델의 오분류 case description)
-  5) <Model>/describe/ 채움
+번역은 vLLM(GPU) 작업과 분리해 효율을 높인다: 모델마다 영어 description 만 만들고,
+전 모델 생성이 끝난 뒤 한 번에 Gemini 배치 번역을 돌린다 (번역은 GPU 불필요).
+이렇게 하면 생성이 Gemini rate limit 에 막히지 않고, 번역은 묶음으로 호출 수를 최소화한다.
+
+흐름:
+  [1단계] 모델마다 — docker compose down/up(VLLM_MODEL+.env.describe override) → /health 폴링
+          → describe_eval.py --no-translate 로 vLLM 영어 description 만 생성 → <Model>/describe/
+  [2단계] 전 모델 끝난 뒤 — 각 모델 describe.jsonl 의 description_ko 를 Gemini 배치로 일괄 채움
 종료 정책: 정상 종료 시 마지막 모델 띄워둠 / Ctrl+C 시 docker compose down.
 
 전제
@@ -33,6 +35,8 @@ from pathlib import Path
 
 from models import MODELS
 from fp_reduction import load_env
+from translate import get_key_and_model
+from retranslate_gemini import retranslate_model
 from sweep import (
     compose, wait_healthy, parse_models, model_dirname, cache_has_weights,
 )
@@ -58,20 +62,20 @@ def build_overlay(args) -> dict:
 
 
 def run_describe(model_id: str, model_dir: Path, args, concurrency: int) -> int:
-    """단일 모델 describe_eval 를 subprocess 로 호출. 반환: returncode."""
+    """단일 모델 describe_eval 를 subprocess 로 호출 (영어 묘사만). 반환: returncode.
+
+    번역은 모든 모델의 영어 생성이 끝난 뒤 sweep 마지막에 한 번에 배치로 처리하므로,
+    여기서는 항상 --no-translate 로 vLLM 영어 description 만 만든다.
+    """
     cmd = [sys.executable, str(DESCRIBE_EVAL),
            "--from", str(model_dir), "--url", args.url, "--model", model_id,
            "--kind", args.kind, "--max-tokens", str(args.max_tokens),
-           "--concurrency", str(concurrency)]
+           "--concurrency", str(concurrency), "--no-translate"]
     if args.category:
         cmd += ["--category", args.category]
     if args.limit:
         cmd += ["--limit", str(args.limit)]
-    if args.gemini_model:
-        cmd += ["--gemini-model", args.gemini_model]
-    if not args.translate:
-        cmd += ["--no-translate"]
-    print(f"\n=== description 생성: {model_id} (동시 {concurrency}) ===", flush=True)
+    print(f"\n=== description(영어) 생성: {model_id} (동시 {concurrency}) ===", flush=True)
     return subprocess.run(cmd, cwd=REPO_ROOT).returncode
 
 
@@ -92,8 +96,12 @@ def main():
     ap.add_argument("--gemini-model", default=None,
                     help="번역에 쓸 Gemini 모델 (생략 시 .env GEMINI_TRANSLATE_MODEL)")
     ap.add_argument("--no-translate", dest="translate", action="store_false",
-                    help="번역(Gemini) 건너뛰고 영어 description 만 저장")
+                    help="번역 단계 생략 — 전 모델 영어 description 만 생성")
     ap.set_defaults(translate=True)
+    ap.add_argument("--batch-size", type=int, default=50,
+                    help="번역 배치 크기 (한 Gemini 호출에 묶을 건수, 기본 50)")
+    ap.add_argument("--translate-concurrency", type=int, default=4,
+                    help="동시에 보낼 번역 묶음 수 (기본 4)")
     # --- describe 전용 서버 오버레이 (.env.describe 보다 우선) ---
     ap.add_argument("--max-num-seqs", type=int, default=None,
                     help="서버 MAX_NUM_SEQS override (.env.describe 보다 우선)")
@@ -138,17 +146,25 @@ def main():
     eff_seqs = overlay.get("MAX_NUM_SEQS") or base_env.get("MAX_NUM_SEQS") or "16"
     concurrency = args.concurrency or int(eff_seqs)
 
+    # 번역 키 사전 확인 (없으면 번역 패스 자동 비활성)
+    translate = args.translate
+    gemini_key, gemini_model = get_key_and_model(None, args.gemini_model)
+    if translate and not gemini_key:
+        print("[경고] GEMINI_API_KEY 가 없어 번역을 건너뜁니다. 영어 description 만 생성합니다.")
+        translate = False
+
     print(f"입력 폴더  : {sweep_dir}")
     print(f"대상 모델  : {available}")
     print(f"공통 옵션  : kind={args.kind}, category={args.category or '전체'}, "
-          f"limit={args.limit or '전수'}, max_tokens={args.max_tokens}, "
-          f"translate={'on' if args.translate else 'off'}")
+          f"limit={args.limit or '전수'}, max_tokens={args.max_tokens}")
+    print(f"번역       : {'전 모델 생성 후 일괄 (Gemini ' + gemini_model + f', 묶음 {args.batch_size}×동시 {args.translate_concurrency})' if translate else 'off (영어만)'}")
     print(f"서버 오버레이: {overlay or '(없음 — .env 기본값)'}")
     print(f"클라이언트 동시성: {concurrency}\n")
 
     results = {}
     try:
         compose(["down"])  # 깨끗한 시작
+        # 1) 전 모델 영어 description 생성 (vLLM). 번역은 여기서 하지 않음.
         for i, model_id in enumerate(available, 1):
             print(f"\n----- [{i}/{len(available)}] {model_id} -----")
             if compose(["up", "-d"], model_id=model_id, extra_env=overlay) != 0:
@@ -164,6 +180,16 @@ def main():
             # 마지막 모델은 띄워둔 채로 종료. 중간 모델은 다음을 위해 down.
             if model_id != available[-1]:
                 compose(["down"])
+
+        # 2) 모든 영어 생성이 끝난 뒤 한 번에 배치 번역 (Gemini, vLLM 불필요).
+        if translate:
+            done = [m for m in available if results.get(m) == "ok"
+                    and (sweep_dir / model_dirname(m) / "describe" / "describe.jsonl").is_file()]
+            if done:
+                print(f"\n=== 한국어 번역 (Gemini 배치, {len(done)}개 모델) ===", flush=True)
+                for m in done:
+                    retranslate_model(sweep_dir / model_dirname(m), gemini_key, gemini_model,
+                                      args.batch_size, args.translate_concurrency)
     except KeyboardInterrupt:
         print("\n[중단] sweep 중단됨 — 컨테이너 정리 후 종료")
         compose(["down"])

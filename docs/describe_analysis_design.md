@@ -109,8 +109,11 @@ Google Gemini API 로 영어→한국어 번역. SDK 없이 `urllib` REST 호출
 - **서버 오버레이** (`build_overlay(args)`): `.env.describe`(있으면) 를 `load_env` 로 읽고 CLI `--max-num-seqs`/`--max-model-len` 을 위에 덮어 dict 반환. 우선순위 CLI > `.env.describe` > (.env/compose 기본값). 이 dict 만 `.env` 를 덮고 나머지는 상속.
 - **대상 결정**: `--models` 지정 시 그 집합, 아니면 `MODELS` 전체. 각 모델에 대해 `{from}/{model_dirname}/manifest.csv` 존재 + HF 캐시 weight 존재인 것만 `available`. 나머지는 사유별 스킵 로그.
 - **클라이언트 동시성**: `--concurrency` 없으면 적용된 `MAX_NUM_SEQS`(오버레이→.env) 에 자동 일치시켜 서버 admission 과 맞춤.
-- **루프(모델마다)**: `compose(["down"])` → `compose(["up","-d"], model_id, extra_env=overlay)` → `wait_healthy(url, load_timeout)` → `subprocess` 로 `describe_eval.py --from {model_dir} --model {id} --kind ... --max-tokens ... --concurrency N [--no-translate]` 실행. 마지막 모델은 띄워둠, 중간 모델은 `down`. `KeyboardInterrupt` 시 `down`.
+- **1단계 — 영어 생성(모델마다)**: `compose(["down"])` → `compose(["up","-d"], model_id, extra_env=overlay)` → `wait_healthy` → `subprocess` 로 `describe_eval.py ... --no-translate` 실행(영어 description 만). 마지막 모델은 띄워둠, 중간 모델은 `down`.
+- **2단계 — 일괄 번역**: 전 모델 영어 생성이 끝난 뒤(루프 밖에서), 성공한 각 모델의 `describe/describe.jsonl` 에 대해 `retranslate_gemini.retranslate_model(...)` 을 호출해 `description_ko` 를 **Gemini 배치**로 채움. 번역은 vLLM 불필요 → GPU 작업과 분리. `--no-translate` 면 이 단계 생략, 키 없으면 자동 비활성.
 - **출력**: 입력 sweep 폴더의 각 `{Model}/describe/` 가 채워짐 (별도 결과 폴더 없음).
+
+> 번역을 모델 생성과 섞지 않고 **전부 생성 후 한 번에** 돌리는 이유: 생성(vLLM/GPU)이 Gemini rate limit 에 안 막히고, 번역을 묶음으로 호출 수를 최소화하기 위함. 단건 호출 대신 `translate_batch_safe` 사용.
 
 `compose()` 는 `sweep.py` 에서 optional `extra_env: dict=None` 인자를 받도록 확장한다(기본 None → 기존 sweep 동작 그대로, 하위호환). `extra_env` 는 `os.environ` 복사본에 덮여 `docker compose` 자식 프로세스에 shell-env 로 전달된다(compose 우선순위 shell > .env).
 
