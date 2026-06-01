@@ -16,15 +16,23 @@ Qwen3_5_test/
 │   │   └── bench_concurrency.py
 │   ├── dataset/               # 데이터셋 통계
 │   │   └── stats.py
-│   └── evaluation/            # 오탐감소율 평가
-│       ├── prompts.py         # 카테고리별 VQA 프롬프트 (편집 대상)
-│       ├── models.py          # sweep 평가 모델 리스트 (편집 대상)
-│       ├── fp_reduction.py    # 단일 모델 평가 러너
-│       └── sweep.py           # 다중 모델 sweep (서버 자동 교체 + 비교)
+│   ├── evaluation/            # 오탐감소율 평가
+│   │   ├── prompts.py         # 카테고리별 VQA 프롬프트 (편집 대상)
+│   │   ├── models.py          # sweep 평가 모델 리스트 (편집 대상)
+│   │   ├── fp_reduction.py    # 단일 모델 FP 평가 (전부 오탐 가정)
+│   │   ├── labeled_eval.py    # 단일 모델 라벨 평가 (오탐감소율 + 정탐률)
+│   │   └── sweep.py           # 다중 모델 sweep (--eval fp|labeled)
+│   └── labeling/             # 카테고리 True/False 라벨링 도구 (웹)
+│       ├── config.py         # 입력/출력 경로 설정 (편집 대상)
+│       ├── label_server.py   # http.server 백엔드 + CLI
+│       └── static/index.html # 키보드 라벨링 UI
 └── docs/                      # 각 도구 상세 문서
     ├── dataset_stats.md
     ├── eval_fp_reduction.md
-    └── sweep.md
+    ├── labeled_eval.md            # 라벨 기반 평가 (오탐감소율 + 정탐률)
+    ├── sweep.md
+    ├── labeling_tool.md           # 라벨링 도구 사용법
+    └── labeling_tool_design.md    # 라벨링 도구 구현 설계(재현용)
 ```
 
 ## 요구 사항
@@ -290,6 +298,34 @@ python src/evaluation/fp_reduction.py --limit 50
 
 카테고리별 프롬프트는 `src/evaluation/prompts.py`에서 편집합니다. 자세한 개념, 옵션, 출력 항목, 실패 케이스 수집 동작은 [docs/eval_fp_reduction.md](docs/eval_fp_reduction.md)를 참고하십시오.
 
+## 라벨 기반 평가 (오탐감소율 + 정탐률)
+
+사람이 검수한 라벨(`true`/`false`)이 붙은 이미지셋에 대해 **두 지표를 동시에** 측정합니다. 단순 FP 거름만이 아니라 "오탐을 줄이면서 정탐을 얼마나 유지하는가"를 양면으로 본다는 게 핵심입니다.
+
+```
+오탐감소율 = TN / (TN + FP)     # false 라벨 중 모델이 no 라 거른 비율
+정탐률     = TP / (TP + FN)     # true  라벨 중 모델이 yes 라 유지한 비율
+```
+
+입력은 라벨링 도구가 만든 export 폴더 (`results/labeling/export/export_<TS>/{cat}/{true,false}/*.jpg`)를 그대로 사용합니다. `--path` 생략 시 가장 최근 export 자동 선택.
+
+```bash
+python src/evaluation/labeled_eval.py                                # 최신 export × 전수
+python src/evaluation/labeled_eval.py --category fire,smoke --limit 50
+```
+
+결과는 `results/eval_labeled_<TS>/`에 모이며, 오분류 케이스가 **fp/**(놓친 오탐)와 **fn/**(놓친 정탐) 두 폴더로 자동 분리됩니다.
+
+```
+results/eval_labeled_20260529_092921/
+├── eval.md / eval.csv                  # 카테고리 × {TP/FN/TN/FP, 오탐감소율, 정탐률}
+├── manifest.csv                        # 오분류 케이스 메타
+├── fp/{category}/*.jpg                 # label=false 인데 모델이 yes (필터 실패)
+└── fn/{category}/*.jpg                 # label=true 인데 모델이 no (정탐 놓침)
+```
+
+자세한 개념·옵션은 [docs/labeled_eval.md](docs/labeled_eval.md) 참고. sweep 과 함께 쓰려면 아래 섹션 `--eval labeled` 참고.
+
 ## 다중 모델 sweep 평가
 
 여러 모델을 차례로 띄워가며 같은 오탐 데이터셋에 대해 평가를 반복하고, 모델별 성능을 한 표로 비교하는 도구입니다. sweep은 `.env`를 수정하지 않고 `docker compose` 호출 시점에 `VLLM_MODEL`만 일시 override하는 방식으로 모델을 교체합니다. 단일 평가 도구(`fp_reduction.py`)는 그대로 두고 위에서 wrapping합니다.
@@ -297,10 +333,13 @@ python src/evaluation/fp_reduction.py --limit 50
 평가 대상 모델은 `src/evaluation/models.py`에서 편집합니다.
 
 ```bash
-python src/evaluation/sweep.py                              # 전 모델 × 전수 평가
+python src/evaluation/sweep.py                              # 전 모델 × 전수 (FP 모드)
 python src/evaluation/sweep.py --limit 50                   # 빠른 샘플 (카테고리당 50장)
 python src/evaluation/sweep.py --models 0.8B,9B             # 부분집합 (단축 매칭)
 python src/evaluation/sweep.py --category falldown,fire,smoke   # 특정 카테고리만
+
+# 라벨 모드 — 오탐감소율과 정탐률을 모델별로 동시 비교
+python src/evaluation/sweep.py --eval labeled
 ```
 
 결과는 `results/sweep_YYYYMMDD_HHMMSS/` 한 폴더에 묶여 저장됩니다.
@@ -318,6 +357,18 @@ sweep_20260528_120000/
 ```
 
 sweep 종료 후에는 마지막 모델이 그대로 띄워져 있어 이어서 다른 작업을 바로 할 수 있습니다. 모델 교체 방식, 옵션, 예외 처리는 [docs/sweep.md](docs/sweep.md)를 참고하십시오.
+
+## 카테고리 True/False 이미지 라벨링
+
+카테고리별로 분류된 썸네일이 진짜 그 카테고리가 맞는지 사람이 키보드로 빠르게 검수하고, 결과를 `{카테고리}/true|false/` 구조로 복사·재정렬하는 웹 기반 도구입니다. 표준 라이브러리 `http.server`로 로컬 웹서버를 띄우므로 별도 설치가 필요 없습니다.
+
+```bash
+python src/labeling/label_server.py        # 기동 후 브라우저에서 http://localhost:8800
+```
+
+`F`/`J`(또는 `↑`/`↓`)로 True/False를 찍으면 자동으로 다음 이미지로 넘어가고, 라벨은 즉시 저장되어 언제든 이어서 작업할 수 있습니다. `E` 키로 결과를 `results/labeling/export/{category}/{true,false}/`에 복사합니다. 입력/출력 경로는 `src/labeling/config.py`에서 바꿉니다.
+
+헤드리스 GPU 서버라면 `ssh -L 8800:localhost:8800 <서버>`로 포트포워딩 후 로컬 브라우저에서 접속합니다. 키보드 조작표, 이어하기, Export, 옵션은 [docs/labeling_tool.md](docs/labeling_tool.md), 구현 세부는 [docs/labeling_tool_design.md](docs/labeling_tool_design.md)를 참고하십시오.
 
 ## 다음 단계
 

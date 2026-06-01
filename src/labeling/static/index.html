@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>카테고리 라벨링</title>
+<style>
+  :root {
+    --bg: #15171c; --panel: #1e2128; --line: #2c303a;
+    --fg: #e6e8ee; --muted: #8b93a3;
+    --true: #34c759; --false: #ff4d4f; --none: #4a4f5c; --accent: #5b8cff;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--fg); font-family: system-ui, sans-serif;
+    display: flex; flex-direction: column; user-select: none;
+  }
+  header {
+    padding: 10px 16px; border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+  }
+  .cat { font-size: 18px; font-weight: 700; }
+  .cat .name { color: var(--accent); }
+  .pos { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .spacer { flex: 1; }
+  .counts { font-variant-numeric: tabular-nums; color: var(--muted); }
+  .counts b.t { color: var(--true); } .counts b.f { color: var(--false); }
+  .bar {
+    width: 100%; height: 6px; background: var(--line);
+    border-radius: 3px; overflow: hidden;
+  }
+  .bar > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .12s; }
+  .barwrap { padding: 0 16px 10px; }
+
+  main {
+    flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    padding: 8px 16px 16px; min-height: 0; position: relative; gap: 10px;
+  }
+  .cat-center {
+    font-size: 26px; font-weight: 800; letter-spacing: .5px;
+    color: var(--accent); text-transform: uppercase;
+  }
+  .frame {
+    max-width: 100%; max-height: 100%; padding: 6px;
+    border: 4px solid var(--none); border-radius: 10px;
+    background: var(--panel); display: flex; transition: border-color .1s;
+  }
+  .frame.true { border-color: var(--true); }
+  .frame.false { border-color: var(--false); }
+  .frame img { max-width: 100%; max-height: 78vh; object-fit: contain; border-radius: 6px; display: block; }
+  .badge {
+    position: absolute; top: 56px; left: 50%; transform: translateX(-50%);
+    padding: 4px 14px; border-radius: 20px; font-weight: 700; font-size: 14px;
+    color: #fff; opacity: 0; transition: opacity .1s;
+  }
+  .badge.show { opacity: 1; }
+  .badge.true { background: var(--true); } .badge.false { background: var(--false); }
+
+  footer {
+    border-top: 1px solid var(--line); padding: 10px 16px;
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    color: var(--muted); font-size: 13px;
+  }
+  kbd {
+    background: var(--panel); border: 1px solid var(--line); border-bottom-width: 2px;
+    border-radius: 5px; padding: 1px 7px; color: var(--fg); font-family: ui-monospace, monospace;
+  }
+  button {
+    background: var(--accent); color: #fff; border: 0; border-radius: 7px;
+    padding: 8px 16px; font-size: 14px; font-weight: 600; cursor: pointer;
+  }
+  button:hover { filter: brightness(1.1); }
+  .auto { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+  #msg { color: var(--accent); min-width: 120px; }
+</style>
+</head>
+<body>
+  <header>
+    <div class="cat"><span class="name" id="cat">—</span></div>
+    <div class="pos"><span id="catpos">0 / 0</span> <span style="opacity:.5">·</span> 전체 <span id="allpos">0 / 0</span></div>
+    <div class="spacer"></div>
+    <div class="counts">라벨됨 <b id="ln">0</b> (<b class="t" id="lt">0</b> / <b class="f" id="lf">0</b>)</div>
+  </header>
+  <div class="barwrap"><div class="bar"><i id="barfill"></i></div></div>
+
+  <main>
+    <div class="cat-center" id="catcenter">—</div>
+    <div class="frame" id="frame"><img id="img" alt=""></div>
+    <div class="badge" id="badge"></div>
+  </main>
+
+  <footer>
+    <span><kbd>F</kbd>/<kbd>1</kbd>/<kbd>↑</kbd> True</span>
+    <span><kbd>J</kbd>/<kbd>0</kbd>/<kbd>↓</kbd> False</span>
+    <span><kbd>←</kbd>/<kbd>→</kbd> 이전·다음</span>
+    <span><kbd>Space</kbd> 다음</span>
+    <span><kbd>⌫</kbd> 취소</span>
+    <span><kbd>[</kbd>/<kbd>]</kbd> 카테고리</span>
+    <span><kbd>Home</kbd>/<kbd>End</kbd> 처음·끝</span>
+    <label class="auto"><input type="checkbox" id="autochk" checked> 라벨 후 자동 다음 <kbd>A</kbd></label>
+    <div class="spacer"></div>
+    <span id="msg"></span>
+    <button id="exportbtn">Export (E)</button>
+  </footer>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+let items = [];          // [{idx, category, rel, label}]
+let cur = 0;             // 현재 인덱스
+let autoAdvance = true;
+const cache = new Map(); // idx -> Image (프리페치)
+
+async function boot() {
+  const r = await fetch("/api/manifest");
+  const m = await r.json();
+  items = m.items;
+  if (!items.length) { $("cat").textContent = "이미지 없음"; return; }
+  // 첫 미라벨 위치로 시작 (이어하기). 전부 라벨됐으면 0.
+  const firstUnlabeled = items.findIndex(it => it.label == null);
+  cur = firstUnlabeled === -1 ? 0 : firstUnlabeled;
+  render();
+}
+
+function imgUrl(idx) { return `/api/image?idx=${idx}`; }
+
+function prefetch(idx) {
+  if (idx < 0 || idx >= items.length || cache.has(idx)) return;
+  const im = new Image();
+  im.src = imgUrl(idx);
+  cache.set(idx, im);
+}
+
+function render() {
+  const it = items[cur];
+  $("img").src = imgUrl(cur);
+  $("cat").textContent = it.category;
+  $("catcenter").textContent = it.category;
+
+  // 카테고리 내 위치
+  const catItems = items.filter(x => x.category === it.category);
+  const catStart = items.findIndex(x => x.category === it.category);
+  $("catpos").textContent = `${cur - catStart + 1} / ${catItems.length}`;
+  $("allpos").textContent = `${cur + 1} / ${items.length}`;
+
+  // 라벨 시각 표시
+  const frame = $("frame");
+  frame.classList.remove("true", "false");
+  if (it.label === "true") frame.classList.add("true");
+  else if (it.label === "false") frame.classList.add("false");
+
+  updateCounts();
+  // 진행도 = 라벨된 개수 / 전체
+  const labeled = items.filter(x => x.label != null).length;
+  $("barfill").style.width = (labeled / items.length * 100) + "%";
+
+  prefetch(cur + 1); prefetch(cur - 1); prefetch(cur + 2);
+}
+
+function updateCounts() {
+  let t = 0, f = 0;
+  for (const it of items) { if (it.label === "true") t++; else if (it.label === "false") f++; }
+  $("lt").textContent = t; $("lf").textContent = f; $("ln").textContent = t + f;
+}
+
+function flashBadge(label) {
+  const b = $("badge");
+  b.textContent = label === "true" ? "TRUE" : "FALSE";
+  b.className = "badge show " + label;
+  clearTimeout(flashBadge._t);
+  flashBadge._t = setTimeout(() => b.classList.remove("show"), 320);
+}
+
+async function setLabel(label) {
+  const it = items[cur];
+  it.label = label;                 // 낙관적 UI
+  render();
+  if (label) flashBadge(label);
+  fetch("/api/label", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ idx: it.idx, label: label }),
+  }).catch(() => { $("msg").textContent = "저장 실패(네트워크)"; });
+  if (label && autoAdvance) go(cur + 1);
+}
+
+function go(idx) {
+  cur = Math.max(0, Math.min(items.length - 1, idx));
+  render();
+}
+
+function jumpCategory(dir) {
+  const cat = items[cur].category;
+  if (dir > 0) {
+    const next = items.findIndex((x, i) => i > cur && x.category !== cat);
+    if (next !== -1) go(next);
+  } else {
+    // 현재 카테고리 시작; 이미 시작이면 이전 카테고리 시작으로
+    const start = items.findIndex(x => x.category === cat);
+    if (cur > start) go(start);
+    else if (start > 0) {
+      const prevCat = items[start - 1].category;
+      go(items.findIndex(x => x.category === prevCat));
+    }
+  }
+}
+
+async function doExport() {
+  $("msg").textContent = "Export 중...";
+  try {
+    const r = await fetch("/api/export", { method: "POST" });
+    const res = await r.json();
+    const folder = (res.out || "").split("/").pop();
+    $("msg").textContent = `복사 ${res.copied}장`
+      + (res.skipped ? ` (누락 ${res.skipped})` : "") + ` → ${folder}`;
+  } catch { $("msg").textContent = "Export 실패"; }
+}
+
+document.addEventListener("keydown", (e) => {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  switch (e.key) {
+    case "f": case "F": case "1": case "ArrowUp":   setLabel("true");  break;
+    case "j": case "J": case "0": case "ArrowDown":  setLabel("false"); break;
+    case "ArrowRight": case " ": go(cur + 1); break;
+    case "ArrowLeft":  go(cur - 1); break;
+    case "Backspace":  setLabel(null); break;
+    case "Home":       go(0); break;
+    case "End":        go(items.length - 1); break;
+    case "[":          jumpCategory(-1); break;
+    case "]":          jumpCategory(1);  break;
+    case "e": case "E": doExport(); break;
+    case "a": case "A":
+      autoAdvance = !autoAdvance; $("autochk").checked = autoAdvance; break;
+    default: return;
+  }
+  e.preventDefault();
+});
+
+$("exportbtn").addEventListener("click", doExport);
+$("autochk").addEventListener("change", (e) => { autoAdvance = e.target.checked; });
+boot();
+</script>
+</body>
+</html>
