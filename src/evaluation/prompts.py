@@ -132,8 +132,36 @@ DEFAULT_PROMPT = (
     "Answer only: \"yes\" or \"no\""
 )
 
+# 모델별 최적 프롬프트 레지스트리 (prompt_opt 의 record-best 가 채움).
+# 구조: {model_id: {category: prompt_text}}. 파일이 없거나 비면 baseline(PROMPTS) 사용.
+import json as _json  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
 
-def get_prompt(category: str) -> str:
+_OPTIMIZED_PATH = _Path(__file__).with_name("optimized_prompts.json")
+
+
+def _load_optimized() -> dict:
+    if _OPTIMIZED_PATH.is_file():
+        try:
+            return _json.loads(_OPTIMIZED_PATH.read_text())
+        except (ValueError, OSError):
+            return {}
+    return {}
+
+
+OPTIMIZED_PROMPTS = _load_optimized()
+
+
+def get_prompt(category: str, model: str = None) -> str:
+    """카테고리 yes/no 프롬프트.
+
+    model 이 주어지고 그 모델·카테고리에 최적화된 프롬프트가 레지스트리에 있으면 그것을,
+    없으면 baseline(PROMPTS) 을 반환한다. baseline 도 없으면 DEFAULT_PROMPT.
+    """
+    if model:
+        opt = OPTIMIZED_PROMPTS.get(model, {}).get(category)
+        if opt:
+            return opt
     return PROMPTS.get(category, DEFAULT_PROMPT)
 
 

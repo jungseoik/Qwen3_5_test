@@ -26,7 +26,9 @@ Qwen3_5_test/
 │   │   ├── translate.py       # Gemini 번역 (영어 description → 한국어, REST)
 │   │   ├── describe_eval.py   # 단일 모델 오분류 description 생성 (vLLM 영어 + Gemini 번역)
 │   │   ├── describe_sweep.py  # 다중 모델 description sweep
-│   │   └── retranslate_gemini.py # 기존 결과 한국어 재번역 (일회성, Gemini 배치)
+│   │   ├── retranslate_gemini.py # 기존 결과 한국어 재번역 (일회성, Gemini 배치)
+│   │   ├── prompt_opt.py      # 카테고리·모델별 프롬프트 최적화 (eval/report/record)
+│   │   └── optimized_prompts.json # 모델별 최적 프롬프트 레지스트리 (편집/산출물)
 │   ├── labeling/             # 카테고리 True/False 라벨링 도구 (웹)
 │   │   ├── config.py         # 입력/출력 경로 설정 (편집 대상)
 │   │   ├── label_server.py   # http.server 백엔드 + CLI
@@ -43,7 +45,9 @@ Qwen3_5_test/
     ├── labeling_tool.md           # 라벨링 도구 사용법
     ├── labeling_tool_design.md    # 라벨링 도구 구현 설계(재현용)
     ├── describe_analysis.md       # 오분류 description 진단 도구 사용법
-    └── describe_analysis_design.md # description 진단 도구 구현 설계(재현용)
+    ├── describe_analysis_design.md # description 진단 도구 구현 설계(재현용)
+    ├── prompt_opt.md              # 프롬프트 최적화 런북 (사람·에이전트 공통)
+    └── prompt_opt_design.md       # 프롬프트 최적화 구현 설계(재현용)
 ```
 
 ## 요구 사항
@@ -396,6 +400,22 @@ python src/analysis/describe_server.py  --path results/sweep_labeled_<TS>
 ```
 
 결과는 기존 sweep 폴더 안 `{Model}/describe/`(jsonl·csv·md)에 제자리로 쌓이며(영어 원문+한국어 번역) 기존 평가 산출물은 건드리지 않습니다. `describe_sweep`는 모델 기동 시 `.env.describe` 오버레이(동시성·컨텍스트 등)를 `.env` 위에 덮어 생성형 워크로드에 맞춥니다. 이미 만든 결과의 한국어 번역만 다시 만들려면 `python src/evaluation/retranslate_gemini.py`(Gemini 배치 번역, 일회성)를 씁니다. Web UI는 모델·FN/FP를 전환하며 왼쪽에 이미지+base 프롬프트, 오른쪽에 한국어 설명(`e`로 영어 원문 전환)을 보여주고 `←`/`→`로 넘깁니다. 카테고리별 프롬프트는 `src/evaluation/prompts.py`의 `DESCRIBE_PROMPTS`에서 편집합니다. 자세한 사용법은 [docs/describe_analysis.md](docs/describe_analysis.md), 구현 세부는 [docs/describe_analysis_design.md](docs/describe_analysis_design.md)를 참고하십시오.
+
+## 카테고리·모델별 프롬프트 최적화
+
+description 진단을 보면 모델은 사건을 잘 인식하는데 base yes/no 프롬프트가 그것을 `no`로 떨어뜨려 FN(놓친 정탐)이 많습니다(예: falldown 의 "lying down → no" 규칙이 진짜 낙상까지 배제). `prompt_opt.py`는 **오탐감소율 하한을 지키며 정탐유지율을 최대화**하도록 프롬프트를 반복 개선합니다. 평가·점수·기록은 CLI, "판단"(프롬프트 문구 수정)만 사람/에이전트가 하므로 **누가 하든 동일하게 재현**됩니다.
+
+```bash
+# 모델 띄운 채 (한 사이클)
+python src/evaluation/prompt_opt.py eval   --model Qwen/Qwen3.5-27B --category falldown --baseline
+python src/evaluation/prompt_opt.py eval   --model Qwen/Qwen3.5-27B --category falldown --prompt-file cand.txt
+python src/evaluation/prompt_opt.py report --model Qwen/Qwen3.5-27B --category falldown
+python src/evaluation/prompt_opt.py record --model Qwen/Qwen3.5-27B --category falldown --version v03 --notes-file why.md
+```
+
+`record`는 승자/베이스라인을 전수 검증해 `optimized_prompts.json`(모델별 최적 프롬프트)에 기록하고, 베이스라인↔최종 지표·delta·원인·반복이력을 담은 `results/prompt_opt/<Model>/<category>/report.md`를 만듭니다. 이후 평가·sweep·describe 가 `get_prompt(category, model)`로 그 모델의 최적 프롬프트를 자동 사용합니다. 단계별 런북은 [docs/prompt_opt.md](docs/prompt_opt.md), 구현 설계는 [docs/prompt_opt_design.md](docs/prompt_opt_design.md).
+
+6개 모델 × {falldown, fire, smoke} 1차 최적화 결과와 모델별 상세·원인·데이터 이슈는 완료 보고서 `results/prompt_opt/SUMMARY.md`(+ 모델별 `REPORT.md`)에 정리되어 있습니다. 핵심 성과: **falldown "수평=낙상(의도 무관)" 처방**으로 큰 모델 정탐유지율 +30~77%p, **fire "작은 화염도 yes" 처방**으로 일부 모델 0→100%p. 결과물(`results/`)은 gitignore이며 최적 프롬프트는 `optimized_prompts.json`으로 버전 관리됩니다.
 
 ## 다음 단계
 

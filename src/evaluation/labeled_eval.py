@@ -59,22 +59,32 @@ def find_latest_export(base: Path) -> Path | None:
     return exports[-1] if exports else None
 
 
-def collect_images(root: Path, categories: list, limit: int, seed: int):
-    """{(category, label): [Path,...]} — root/{cat}/{true,false}/*.jpg 수집 (limit 시 랜덤)."""
+def collect_images(root: Path, categories: list, limit: int, seed: int, max_neg: int = 0):
+    """{(category, label): [Path,...]} — root/{cat}/{true,false}/*.jpg 수집.
+
+    max_neg>0 (dev 서브셋 모드): positive(true) 는 전부 유지하고 negative(false) 만
+    max_neg 개로 캡(seed 고정 랜덤). 정탐 표본이 희소하므로 retention 측정을 위해 전부 살린다.
+    max_neg=0 (기본): 기존 동작 — limit 시 true/false 모두 limit 개로 캡.
+    """
     rng = random.Random(seed)
     out = {}
     for cat in categories:
         for label in ("true", "false"):
             d = root / cat / label
             imgs = sorted(d.glob("*.jpg")) if d.is_dir() else []
-            if limit and len(imgs) > limit:
+            if max_neg:
+                if label == "false" and len(imgs) > max_neg:
+                    imgs = rng.sample(imgs, max_neg)
+                # true 는 캡하지 않음
+            elif limit and len(imgs) > limit:
                 imgs = rng.sample(imgs, limit)
             out[(cat, label)] = imgs
     return out
 
 
-def one_request(url: str, model: str, category: str, label: str, img: Path, max_tokens: int):
-    payload = build_payload(model, img, get_prompt(category), max_tokens)
+def one_request(url: str, model: str, category: str, label: str, img: Path,
+                max_tokens: int, prompt: str):
+    payload = build_payload(model, img, prompt, max_tokens)
     req = urllib.request.Request(
         f"{url}/v1/chat/completions", data=payload,
         headers={"Content-Type": "application/json"},
@@ -183,7 +193,7 @@ def render(agg: dict, elapsed: float, total: int):
 
 
 def save(out_dir: Path, rows: list, model: str, args, env: dict, concurrency: int,
-         categories: list, export_path: Path):
+         categories: list, export_path: Path, prompt_by_cat: dict = None):
     out_dir.mkdir(parents=True, exist_ok=True)
     cols = ["category", "total", "positives", "negatives",
             "tp", "fn", "tn", "fp", "unparsed", "error",
@@ -219,7 +229,7 @@ def save(out_dir: Path, rows: list, model: str, args, env: dict, concurrency: in
 
         f.write("\n## 사용 프롬프트\n\n")
         for cat in categories:
-            prompt = PROMPTS.get(cat, "(기본 프롬프트)")
+            prompt = (prompt_by_cat or {}).get(cat) or PROMPTS.get(cat, "(기본 프롬프트)")
             f.write(f"### {cat}\n\n```\n{prompt}\n```\n\n")
 
     print(f"\n저장: {out_dir}/  (eval.md, eval.csv)")
@@ -282,6 +292,12 @@ def main():
                     help=f"평가 카테고리 콤마 구분 (기본 {','.join(DEFAULT_CATEGORIES)})")
     ap.add_argument("--limit", type=int, default=0,
                     help="카테고리/라벨당 샘플 수 (0=전수)")
+    ap.add_argument("--max-neg", type=int, default=0,
+                    help="dev 서브셋: negative 만 N개로 캡, positive 는 전부 유지 (0=미사용). "
+                         "프롬프트 최적화 반복용. limit 보다 우선")
+    ap.add_argument("--prompt-file", default=None,
+                    help="이 파일 내용을 프롬프트로 사용(--category 의 모든 카테고리에 적용, "
+                         "보통 단일 카테고리 최적화 후보 평가용). 생략 시 prompts.get_prompt 사용")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--concurrency", type=int, default=None,
                     help="동시 요청 수 (생략 시 .env MAX_NUM_SEQS)")
@@ -321,19 +337,31 @@ def main():
 
     # 카테고리 별 이미지 수집
     categories = [c.strip() for c in args.category.split(",") if c.strip()]
-    images = collect_images(export_path, categories, args.limit, args.seed)
+    images = collect_images(export_path, categories, args.limit, args.seed, args.max_neg)
     tasks = [(cat, label, img)
              for (cat, label), imgs in images.items() for img in imgs]
     if not tasks:
         raise SystemExit(
             f"[에러] 평가할 이미지가 없습니다. 경로/카테고리 확인:\n  {export_path}")
 
+    # 카테고리별 프롬프트 결정: --prompt-file 우선, 없으면 모델별 최적/baseline
+    prompt_override = None
+    if args.prompt_file:
+        prompt_override = Path(args.prompt_file).read_text().strip()
+    prompt_by_cat = {c: (prompt_override if prompt_override is not None else get_prompt(c, model))
+                     for c in categories}
+    prompt_src = (f"파일 {args.prompt_file}" if prompt_override is not None
+                  else "prompts.get_prompt(모델별 최적/baseline)")
+
     # 헤더
     print(f"서버         : {args.url}")
     print(f"모델         : {model}")
     print(f"라벨 export  : {export_path}")
     print(f"카테고리     : {','.join(categories)}")
-    print(f"limit        : {'전수' if not args.limit else f'카테고리/라벨당 {args.limit}장'}")
+    sub = (f"dev(neg≤{args.max_neg}, pos 전부)" if args.max_neg
+           else ('전수' if not args.limit else f'카테고리/라벨당 {args.limit}장'))
+    print(f"샘플         : {sub}")
+    print(f"프롬프트     : {prompt_src}")
     print(f"동시 요청    : {concurrency}")
     counts_str = ", ".join(
         f"{c}(t:{len(images.get((c,'true'),[]))}/f:{len(images.get((c,'false'),[]))})"
@@ -350,7 +378,8 @@ def main():
     progress = Progress(len(tasks))
     t0 = time.perf_counter()
     with ThreadPoolExecutor(max_workers=concurrency) as ex:
-        futures = [ex.submit(one_request, args.url, model, c, lbl, img, args.max_tokens)
+        futures = [ex.submit(one_request, args.url, model, c, lbl, img,
+                             args.max_tokens, prompt_by_cat[c])
                    for c, lbl, img in tasks]
         for done_idx, fut in enumerate(as_completed(futures), 1):
             records.append(fut.result())
@@ -363,7 +392,7 @@ def main():
     if not args.no_save:
         out_dir = Path(args.out) if args.out else (
             RESULTS_DIR / f"eval_labeled_{datetime.now():%Y%m%d_%H%M%S}")
-        save(out_dir, rows, model, args, env, concurrency, categories, export_path)
+        save(out_dir, rows, model, args, env, concurrency, categories, export_path, prompt_by_cat)
         modes = parse_collect_modes(args.collect)
         if modes:
             c = collect_cases(records, out_dir, modes, symlink=args.symlink)
